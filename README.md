@@ -1,3 +1,3 @@
-# Cắt video 15 giây ✂️
+# Tua nhanh video 15 giây ⏩
 
-Cắt ngắn video (quay bằng iPhone) còn 15 giây, ngay trên máy, không nén lại nên giữ nguyên chất lượng. Mở bằng Safari trên iPhone → Chia sẻ → Thêm vào MH chính.
+Tua nhanh cả video (quay bằng iPhone) cho vừa đúng 15 giây, làm ngay trên máy, không gửi video đi đâu. Mở bằng Safari trên iPhone → Chia sẻ → Thêm vào MH chính.

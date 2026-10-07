@@ -5,14 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Cắt 15s">
+<meta name="apple-mobile-web-app-title" content="Tua 15s">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" href="icons/icon-192.png">
 <meta name="theme-color" content="#111318">
 <meta name="robots" content="noindex, nofollow">
-<title>Cắt 15 giây</title>
+<title>Tua nhanh 15s</title>
 <style>
   :root { --bg: #111318; --card: #1c1f27; --line: #2c303b; --text: #f2f3f5; --mute: #9aa0ad; --accent: #ffcc33; --ok: #4cd18a; --err: #ff6b6b; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -38,45 +38,41 @@
   .hide { display: none !important; }
   .msg { padding: 10px 12px; border-radius: 12px; background: #2a2e39; font-size: 15px; }
   .msg.err { background: #3a1f22; color: #ffb4b4; }
+  .bar { height: 10px; border-radius: 6px; background: #2a2e39; overflow: hidden; }
+  .bar div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
   .msg.ok { background: #18352a; color: #b9f3d3; }
 </style>
 </head>
 <body>
-<header><h1>✂️ Cắt video còn 15 giây</h1></header>
+<header><h1>⏩ Tua nhanh video còn 15 giây</h1></header>
 <main>
   <label class="btn main" for="file">🎬 Chọn video</label>
   <input id="file" type="file" accept="video/*,.mov,.mp4,.m4v">
-  <div class="muted" id="hint">Chọn video quay bằng iPhone. Cắt xong app tự mở bảng lưu — bấm <b>Lưu video</b> là vào Ảnh. Cắt thẳng trên máy, không nén lại nên giữ nguyên chất lượng, không gửi đi đâu.</div>
+  <div class="muted" id="hint">Chọn video quay bằng iPhone. App tua nhanh cả video cho vừa đúng 15 giây (30 khung/giây, giữ độ nét và tỉ lệ khung hình), làm ngay trên máy, không gửi đi đâu. Video tua nhanh không có tiếng.</div>
 
   <section class="card hide" id="editCard">
-    <video id="src" playsinline controls preload="auto"></video>
+    <video id="src" playsinline controls preload="metadata"></video>
     <div class="muted" id="info"></div>
-    <div id="pickBox" class="hide">
-      <div class="big" id="range"></div>
-      <input id="start" type="range" min="0" max="0" step="0.1" value="0" aria-label="Điểm bắt đầu">
-      <div class="muted">Kéo để chọn đoạn 15 giây muốn giữ.</div>
-    </div>
-    <div class="row">
-      <button class="btn sub" id="playBtn">▶ Xem đoạn này</button>
-    </div>
-    <button class="btn main" id="cutBtn">✂️ Cắt 15 giây</button>
+    <div class="big" id="speed"></div>
+    <button class="btn main" id="goBtn">⏩ Tua nhanh còn 15 giây</button>
+    <div class="bar hide" id="bar"><div id="barFill"></div></div>
     <div class="msg hide" id="msg"></div>
   </section>
 
   <section class="card hide" id="outCard">
     <div class="big">✓ Xong</div>
-    <video id="out" playsinline controls></video>
+    <video id="out" playsinline controls loop></video>
     <div class="muted" id="outInfo"></div>
-    <button class="btn main" id="shareBtn">📥 Lưu vào Ảnh / Chia sẻ</button>
+    <button class="btn main" id="shareBtn">📥 Lưu vào Ảnh</button>
     <a class="btn sub" id="dl" download>Tải file về</a>
   </section>
 </main>
 
 <script>
 'use strict';
-const LEN = 15; // độ dài video sau khi cắt (giây)
+const LEN = 15, FPS = 30; // video ra: 15 giây, 30 khung/giây
 const $ = (id) => document.getElementById(id);
-let file = null, movie = null, srcUrl = '', outUrl = '', outFile = null, stopAt = null;
+let file = null, movie = null, srcUrl = '', outUrl = '', outFile = null, busy = false;
 
 // ---------- Đọc / ghi hộp MP4-MOV ----------
 const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'dinf']);
@@ -242,242 +238,285 @@ async function openMovie(f) {
   return { ftyp, moov, mvhd, scale, tracks, video, duration };
 }
 
-// Điểm bắt đầu thật: khung hình chính gần nhất trước (hoặc đúng) thời điểm chọn
-function snapStart(m, T) {
+// ---------- Mã codec cho bộ giải mã ----------
+const hex2 = (n) => n.toString(16).padStart(2, '0');
+function videoConfig(v) {
+  const stsd = find(v.stbl, 'stsd');
+  const e = stsd.hdr + 8, u8 = stsd.data, d = dv(stsd);
+  const type = typeAt(u8, e + 4), eEnd = e + u32(d, e);
+  const w = d.getUint16(e + 32), h = d.getUint16(e + 34);
+  let p = e + 86, codec = null, desc = null;
+  while (p + 8 <= eEnd) {
+    const size = u32(d, p), bt = typeAt(u8, p + 4);
+    if (size < 8) break;
+    const b = u8.subarray(p + 8, p + size);
+    if (bt === 'avcC') { desc = b; codec = type + '.' + hex2(b[1]) + hex2(b[2]) + hex2(b[3]); }
+    if (bt === 'hvcC') {
+      desc = b;
+      const space = b[1] >> 6, tier = (b[1] >> 5) & 1, prof = b[1] & 31;
+      let compat = ((b[2] << 24) | (b[3] << 16) | (b[4] << 8) | b[5]) >>> 0, rev = 0;
+      for (let i = 0; i < 32; i++) { rev = (rev << 1) | (compat & 1); compat >>>= 1; }
+      const cons = Array.from(b.subarray(6, 12));
+      while (cons.length && !cons[cons.length - 1]) cons.pop();
+      codec = [type, ['', 'A', 'B', 'C'][space] + prof, (rev >>> 0).toString(16), (tier ? 'H' : 'L') + b[12], ...cons.map((c) => c.toString(16))].join('.');
+    }
+    p += size;
+  }
+  if (!codec) throw new Error('Chưa hỗ trợ kiểu nén video này (' + type + ').');
+  return { codec, description: desc.slice(), codedWidth: w, codedHeight: h };
+}
+
+// ---------- Tua nhanh: giải mã → chọn khung → mã hoá lại ----------
+async function speedUp(m, onProgress) {
   const v = m.video;
-  if (!v || !v.sync) return { t: T, k: v ? lastBefore(v, T) : -1 };
-  let k = -1;
-  for (let i = 0; i < v.n; i++) if (v.sync[i] && v.pres(i) <= T + 0.001) k = i;
-  if (k < 0) k = v.sync.indexOf(1);
-  return { t: Math.max(0, v.pres(k)), k };
-}
-function lastBefore(t, T) { let k = 0; for (let i = 0; i < t.n; i++) if (t.pres(i) <= T + 0.001) k = i; return k; }
+  if (!v) throw new Error('File không có hình.');
+  if (!window.VideoDecoder || !window.VideoEncoder) throw new Error('Máy chưa hỗ trợ. Cần iPhone chạy iOS 16.4 trở lên (Safari).');
+  const dcfg = videoConfig(v);
+  if (!(await VideoDecoder.isConfigSupported(dcfg)).supported) throw new Error('Máy không giải mã được video này (' + dcfg.codec + ').');
 
-function cutMovie(m, T, len) {
-  const { t: Ts, k } = snapStart(m, T);
-  const L = Math.min(len, m.duration - Ts), Te = Ts + L;
-  const picks = [];
-  for (const tr of m.tracks) {
-    let s, e = -1, mediaStart;
-    if (tr === m.video) {
-      s = k;
-      for (let i = s; i < tr.n; i++) if (tr.pres(i) < Te - 0.0005) e = i;
-      mediaStart = Math.round((Ts - tr.delay) * tr.scale + tr.e0) - tr.dts[s];
-    } else {
-      const mt = Math.max(0, (Ts - tr.delay) * tr.scale + tr.e0), mtEnd = (Te - tr.delay) * tr.scale + tr.e0;
-      s = 0;
-      for (let i = 0; i < tr.n; i++) if (tr.dts[i] <= mt) s = i;
-      if (s > 0 && !(tr.sync && !tr.sync[s - 1])) s--; // lấy thêm 1 mẫu đệm cho âm thanh liền mạch
-      for (let i = s; i < tr.n; i++) if (tr.dts[i] < mtEnd) e = i;
-      mediaStart = Math.round(mt) - tr.dts[s];
-    }
-    if (e < s) continue;
-    picks.push({ tr, s, e, mediaStart: Math.max(0, mediaStart), segDur: Math.round(L * m.scale) });
+  // Thứ tự hiển thị của các khung
+  const order = Array.from({ length: v.n }, (_, i) => i).sort((a, b) => v.pres(a) - v.pres(b));
+  const t0 = v.pres(order[0]), t1 = v.pres(order[v.n - 1]) + v.durs[order[v.n - 1]] / v.scale;
+  const N = Math.round(LEN * FPS), span = t1 - t0;
+  const targets = Array.from({ length: N }, (_, j) => t0 + (j * span) / N);
+
+  // Chỉ giải mã những khung cần (từ khung chính gần nhất tới khung được chọn)
+  const need = new Uint8Array(v.n);
+  let oi = 0;
+  for (const t of targets) {
+    while (oi + 1 < v.n && v.pres(order[oi + 1]) <= t + 1e-6) oi++;
+    let d = order[oi], k = d;
+    while (k > 0 && v.sync && !v.sync[k]) k--;
+    for (let i = d; i >= k && !need[i]; i--) need[i] = 1;
   }
+  const feed = [];
+  for (let i = 0; i < v.n; i++) if (need[i]) feed.push(i);
 
-  // Xếp các mẫu theo thứ tự trong file gốc (giữ nguyên cách đan hình/tiếng), gom thành chunk
-  const all = [];
-  picks.forEach((p, ti) => { for (let i = p.s; i <= p.e; i++) all.push({ ti, i, off: p.tr.offs[i], size: p.tr.sizes[i] }); });
-  all.sort((a, b) => a.off - b.off);
-  let pos = 0;
-  for (const p of picks) { p.chunkPos = []; p.chunkCounts = []; p.chunkSdi = []; }
-  let prev = -1;
-  for (const smp of all) {
-    const p = picks[smp.ti], sdi = p.tr.sdi[smp.i];
-    if (prev === smp.ti && p.chunkSdi[p.chunkSdi.length - 1] === sdi) p.chunkCounts[p.chunkCounts.length - 1]++;
-    else { p.chunkPos.push(pos); p.chunkCounts.push(1); p.chunkSdi.push(sdi); }
-    smp.newPos = pos; pos += smp.size; prev = smp.ti;
-  }
-  const mdatSize = pos;
+  let W = 0, H = 0, canvas, ctx, encoder = null, avcC = null, failed = null;
+  const out = [];
+  let j = 0, prev = null, encodedCount = 0;
 
-  // Dựng lại moov
-  const build = (base) => {
-    const kids = [];
-    for (const k of m.moov.kids) {
-      if (k.type === 'mvhd') {
-        const c = { ...k, data: k.data.slice() };
-        setDur(c, 16, 24, Math.max(...picks.map((p) => p.segDur)));
-        kids.push(c);
-      } else if (k.type === 'trak') {
-        const p = picks.find((x) => x.tr.trak === k);
-        if (p) kids.push(buildTrak(p, base));
-      } else if (k.type !== 'iods') kids.push(k);
+  const startEncoder = async (frame) => {
+    W = frame.displayWidth & ~1; H = frame.displayHeight & ~1;
+    canvas = window.OffscreenCanvas ? new OffscreenCanvas(W, H) : Object.assign(document.createElement('canvas'), { width: W, height: H });
+    ctx = canvas.getContext('2d');
+    const big = W * H > 2100000;
+    const codecs = big ? ['avc1.640033', 'avc1.4d0033'] : ['avc1.640028', 'avc1.4d0028', 'avc1.42e028'];
+    let cfg = null;
+    for (const c of codecs) {
+      const t = { codec: c, width: W, height: H, bitrate: big ? 40e6 : 16e6, framerate: FPS, avc: { format: 'avc' }, latencyMode: 'realtime' };
+      if ((await VideoEncoder.isConfigSupported(t)).supported) { cfg = t; break; }
     }
-    return serialize({ type: 'moov', kids });
+    if (!cfg) throw new Error('Máy không mã hoá được video ' + W + '×' + H + '.');
+    encoder = new VideoEncoder({
+      output: (chunk, meta) => {
+        const dsc = meta && meta.decoderConfig && meta.decoderConfig.description;
+        if (dsc && !avcC) avcC = ArrayBuffer.isView(dsc) ? new Uint8Array(dsc.buffer, dsc.byteOffset, dsc.byteLength).slice() : new Uint8Array(dsc).slice();
+        const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data);
+        out.push({ data, ts: chunk.timestamp, key: chunk.type === 'key' });
+        encodedCount++;
+      },
+      error: (e) => { failed = e; },
+    });
+    encoder.configure(cfg);
   };
-  const ftyp = m.ftyp || new Uint8Array(0);
-  const len1 = build(0).length;
-  const big = mdatSize + 8 > 0xffffffff;
-  const mdatHdr = big ? new Uint8Array(16) : new Uint8Array(8);
-  const hd = new DataView(mdatHdr.buffer);
-  if (big) { hd.setUint32(0, 1); hd.setUint32(8, Math.floor((mdatSize + 16) / 4294967296)); hd.setUint32(12, (mdatSize + 16) >>> 0); }
-  else hd.setUint32(0, mdatSize + 8);
-  mdatHdr.set([109, 100, 97, 116], 4); // "mdat"
-  const base = ftyp.length + len1 + mdatHdr.length;
-  const moov = build(base);
 
-  // Phần dữ liệu: các đoạn liền nhau của file gốc (đọc thẳng từ file, không chép vào bộ nhớ)
-  const parts = [ftyp, moov, mdatHdr];
-  let runA = -1, runB = -1;
-  for (const smp of all) {
-    if (smp.off === runB) runB += smp.size;
-    else { if (runA >= 0) parts.push(file.slice(runA, runB)); runA = smp.off; runB = smp.off + smp.size; }
+  const emit = (frame, idx) => {
+    ctx.drawImage(frame, 0, 0, W, H);
+    const vf = new VideoFrame(canvas, { timestamp: Math.round((idx * 1e6) / FPS), duration: Math.round(1e6 / FPS) });
+    encoder.encode(vf, { keyFrame: idx % FPS === 0 });
+    vf.close();
+  };
+  // Khung ra theo thứ tự hiển thị; khung cho mốc t = khung cuối cùng có thời điểm ≤ t
+  let pendingFrame = null; const frameQueue = [];
+  const onFrame = (frame) => frameQueue.push(frame);
+  const drain = async () => {
+    while (frameQueue.length) {
+      const frame = frameQueue.shift();
+      if (failed) { frame.close(); continue; }
+      if (!encoder) await startEncoder(frame);
+      const p = frame.timestamp / 1e6;
+      while (j < N && targets[j] < p - 1e-6) { emit(prev || frame, j); j++; }
+      if (prev) prev.close();
+      prev = frame;
+      onProgress(j / N);
+    }
+  };
+
+  const decoder = new VideoDecoder({ output: onFrame, error: (e) => { failed = e; } });
+  decoder.configure(dcfg);
+
+  // Đọc dữ liệu theo từng khối lớn cho nhanh
+  let cache = null;
+  const readSample = async (i) => {
+    const o = v.offs[i], s = v.sizes[i];
+    if (!cache || o < cache.start || o + s > cache.start + cache.bytes.length) {
+      cache = { start: o, bytes: await readFileBytes(file, o, Math.min(file.size, o + Math.max(s, 4 << 20))) };
+    }
+    return cache.bytes.subarray(o - cache.start, o - cache.start + s);
+  };
+
+  let last = -1;
+  for (const i of feed) {
+    if (failed) break;
+    if (last >= 0 && i !== last + 1) {
+      // Nhảy qua đoạn bỏ: xả hết khung đang chờ rồi giải mã lại từ khung chính (tránh khung mượn đoạn trước)
+      await decoder.flush().catch((e) => { failed = e; });
+      await drain();
+      decoder.reset(); decoder.configure(dcfg);
+    }
+    last = i;
+    const data = await readSample(i);
+    decoder.decode(new EncodedVideoChunk({
+      type: !v.sync || v.sync[i] ? 'key' : 'delta',
+      timestamp: Math.round(v.pres(i) * 1e6),
+      duration: Math.round((v.durs[i] / v.scale) * 1e6),
+      data,
+    }));
+    while (!failed && (decoder.decodeQueueSize > 6 || (encoder && encoder.encodeQueueSize > 6) || frameQueue.length)) {
+      await drain();
+      if (decoder.decodeQueueSize > 6 || (encoder && encoder.encodeQueueSize > 6)) await new Promise((r) => setTimeout(r, 2));
+    }
   }
-  if (runA >= 0) parts.push(file.slice(runA, runB));
-  return { parts, start: Ts, len: L };
+  if (!failed) { await decoder.flush().catch((e) => { failed = e; }); await drain(); }
+  if (!failed && prev) { while (j < N) { emit(prev, j); j++; } }
+  if (prev) prev.close();
+  try { decoder.close(); } catch (_) {}
+  if (failed) throw new Error(failed.message || String(failed));
+  if (!encoder) throw new Error('Không đọc được khung hình nào.');
+  await encoder.flush();
+  encoder.close();
+  if (!avcC || !out.length) throw new Error('Mã hoá lỗi.');
+  return { samples: out, avcC, W, H, srcDur: span, speed: span / LEN };
 }
 
-function buildTrak(p, base) {
-  const tr = p.tr, idx = [];
-  for (let i = p.s; i <= p.e; i++) idx.push(i);
-  // stts
-  const stts = [];
-  for (const i of idx) {
-    const d = tr.durs[i];
-    if (stts.length && stts[stts.length - 1][1] === d) stts[stts.length - 1][0]++; else stts.push([1, d]);
-  }
-  const newStts = fullbox('stts', 0, 0, words([stts.length]), words(stts.flat()));
-  // ctts
-  let newCtts = null;
-  if (tr.hasCtts) {
-    const c = [];
-    for (const i of idx) {
-      const o = tr.ctts[i];
-      if (c.length && c[c.length - 1][1] === o) c[c.length - 1][0]++; else c.push([1, o]);
+// ---------- Ghép thành file MP4 ----------
+const u16s = (arr) => { const o = new Uint8Array(arr.length * 2), d = new DataView(o.buffer); arr.forEach((x, i) => d.setUint16(i * 2, x)); return o; };
+function muxMp4(m, r) {
+  const TS = 30000, DUR = TS / FPS, n = r.samples.length;
+  const movieScale = m.scale, movieDur = Math.round((n / FPS) * movieScale);
+  const ftyp = box('ftyp', new TextEncoder().encode('mp42'), words([0]), new TextEncoder().encode('isommp42'));
+
+  // mvhd, tkhd chép từ file gốc (giữ ngày quay, hướng xoay), sửa thời lượng
+  const mvhd = { ...m.mvhd, data: m.mvhd.data.slice() };
+  setDur(mvhd, 16, 24, movieDur);
+  dv(mvhd).setUint32(mvhd.hdr + (mvhd.data[mvhd.hdr] === 1 ? 108 : 96), 2);
+  const srcTkhd = find(m.video.trak, 'tkhd');
+  const tkhd = { ...srcTkhd, data: srcTkhd.data.slice() };
+  setDur(tkhd, 20, 28, movieDur);
+  dv(tkhd).setUint32(tkhd.hdr + (tkhd.data[tkhd.hdr] === 1 ? 20 : 12), 1);
+  dv(tkhd).setUint32(tkhd.hdr, (tkhd.data[tkhd.hdr] << 24) | 3); // bật track
+
+  // Thứ tự giải mã: dts tăng đều; ctts nếu bộ mã hoá có đảo khung
+  const offs = r.samples.map((s, i) => Math.round((s.ts * TS) / 1e6) - i * DUR);
+  const minOff = Math.min(0, ...offs);
+  const hasCtts = offs.some((o) => o !== 0);
+  const entry = box('avc1', new Uint8Array(6), u16s([1]), new Uint8Array(16), u16s([r.W, r.H]), words([0x00480000, 0x00480000, 0]), u16s([1]),
+    new Uint8Array(32), u16s([0x18, 0xffff]), box('avcC', r.avcC));
+  const sizes = r.samples.map((s) => s.data.length);
+  const per = FPS; // số khung mỗi chunk
+  const nChunks = Math.ceil(n / per);
+  const sc = [[1, per, 1]]; if (n % per && nChunks > 1) sc.push([nChunks, n % per, 1]); if (nChunks === 1) sc[0][1] = n;
+  const stbl = (base) => {
+    const chunkOffs = []; let pos = base;
+    for (let c = 0; c < nChunks; c++) { chunkOffs.push(pos); for (let i = c * per; i < Math.min(n, (c + 1) * per); i++) pos += sizes[i]; }
+    const kids = [fullbox('stsd', 0, 0, words([1]), entry), fullbox('stts', 0, 0, words([1, n, DUR]))];
+    if (hasCtts) {
+      const flat = new Uint8Array(n * 8), d = new DataView(flat.buffer);
+      offs.forEach((o, i) => { d.setUint32(i * 8, 1); d.setInt32(i * 8 + 4, o - minOff); });
+      kids.push(fullbox('ctts', 0, 0, words([n]), flat));
     }
-    const flat = new Uint8Array(c.length * 8), d = new DataView(flat.buffer);
-    c.forEach(([n, o], j) => { d.setUint32(j * 8, n); d.setInt32(j * 8 + 4, o); });
-    newCtts = fullbox('ctts', c.some(([, o]) => o < 0) ? 1 : 0, 0, words([c.length]), flat);
-  }
-  // stss
-  let newStss = null;
-  if (tr.sync) {
-    const s = idx.map((i, j) => tr.sync[i] ? j + 1 : 0).filter(Boolean);
-    newStss = fullbox('stss', 0, 0, words([s.length]), words(s));
-  }
-  const newStsz = fullbox('stsz', 0, 0, words([0, idx.length]), words(idx.map((i) => tr.sizes[i])));
-  const sc = [];
-  p.chunkCounts.forEach((n, j) => {
-    const last = sc[sc.length - 1];
-    if (!last || last[1] !== n || last[2] !== p.chunkSdi[j]) sc.push([j + 1, n, p.chunkSdi[j]]);
-  });
-  const newStsc = fullbox('stsc', 0, 0, words([sc.length]), words(sc.flat()));
-  const newStco = fullbox('stco', 0, 0, words([p.chunkPos.length]), words(p.chunkPos.map((x) => x + base)));
-
-  const stblKids = [find(tr.stbl, 'stsd'), { data: newStts }];
-  if (newCtts) stblKids.push({ data: newCtts });
-  if (newStss) stblKids.push({ data: newStss });
-  stblKids.push({ data: newStsc }, { data: newStsz }, { data: newStco });
-
-  const mediaDur = idx.reduce((a, i) => a + tr.durs[i], 0);
-  const swap = (node) => {
-    if (node.type === 'stbl') return { type: 'stbl', kids: stblKids };
-    if (node.type === 'mdhd') { const c = { ...node, data: node.data.slice() }; setDur(c, 16, 24, mediaDur); return c; }
-    return node.kids ? { type: node.type, kids: node.kids.map(swap) } : node;
+    const keys = r.samples.map((s, i) => s.key ? i + 1 : 0).filter(Boolean);
+    kids.push(fullbox('stss', 0, 0, words([keys.length]), words(keys)), fullbox('stsc', 0, 0, words([sc.length]), words(sc.flat())),
+      fullbox('stsz', 0, 0, words([0, n]), words(sizes)), fullbox('stco', 0, 0, words([nChunks]), words(chunkOffs)));
+    return box('stbl', ...kids);
   };
-  const kids = [];
-  for (const k of tr.trak.kids) {
-    if (k.type === 'tkhd') {
-      const c = { ...k, data: k.data.slice() };
-      setDur(c, 20, 28, p.segDur);
-      kids.push(c);
-      kids.push({ data: box('edts', fullbox('elst', 0, 0, words([1, p.segDur]), words([p.mediaStart], true), words([0x00010000]))) });
-    } else if (k.type === 'edts' || k.type === 'tref') continue;
-    else kids.push(swap(k));
-  }
-  return { type: 'trak', kids };
+  const edts = box('edts', fullbox('elst', 0, 0, words([1, movieDur]), words([-minOff], true), words([0x00010000])));
+  const mdhd = fullbox('mdhd', 0, 0, words([0, 0, TS, n * DUR]), u16s([0x55c4, 0]));
+  const hdlr = fullbox('hdlr', 0, 0, words([0]), new TextEncoder().encode('vide'), new Uint8Array(12), new TextEncoder().encode('VideoHandler\0'));
+  const vmhd = fullbox('vmhd', 0, 1, new Uint8Array(8));
+  const dinf = box('dinf', fullbox('dref', 0, 0, words([1]), fullbox('url ', 0, 1)));
+  const extra = m.moov.kids.filter((k) => k.type === 'udta' || k.type === 'meta').map(serialize);
+  const moov = (base) => box('moov', mvhd.data, box('trak', tkhd.data, edts, box('mdia', mdhd, hdlr, box('minf', vmhd, dinf, stbl(base)))), ...extra);
+  const total = sizes.reduce((a, b) => a + b, 0);
+  const len = moov(0).length;
+  const base = ftyp.length + len + 8;
+  const mdatHdr = new Uint8Array(8); new DataView(mdatHdr.buffer).setUint32(0, total + 8); mdatHdr.set([109, 100, 97, 116], 4);
+  return new Blob([ftyp, moov(base), mdatHdr, ...r.samples.map((s) => s.data)], { type: 'video/mp4' });
 }
 
 // ---------- Giao diện ----------
-const fmt = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); return m + ':' + (s - m * 60).toFixed(1).padStart(4, '0'); };
+const fmt = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); return m + ':' + String(Math.round(s - m * 60)).padStart(2, '0'); };
 const mb = (b) => (b / 1048576).toFixed(1).replace('.', ',') + ' MB';
+const num = (x) => (x >= 10 ? Math.round(x) : x.toFixed(1).replace('.', ','));
 function say(text, kind) { const el = $('msg'); el.textContent = text; el.className = 'msg' + (kind ? ' ' + kind : ''); el.classList.toggle('hide', !text); }
 
 $('file').addEventListener('change', async (e) => {
   const f = e.target.files[0]; e.target.value = '';
-  if (!f) return;
+  if (!f || busy) return;
   file = f; movie = null;
   $('outCard').classList.add('hide');
   $('editCard').classList.remove('hide');
   $('hint').classList.add('hide');
+  $('bar').classList.add('hide');
   if (srcUrl) URL.revokeObjectURL(srcUrl);
   srcUrl = URL.createObjectURL(f);
   $('src').src = srcUrl;
   $('info').textContent = f.name + ' · ' + mb(f.size);
-  $('pickBox').classList.add('hide');
-  $('cutBtn').disabled = true; say('Đang đọc video…');
-  try {
-    movie = await openMovie(f);
-  } catch (err) { say(err.message, 'err'); return; }
+  $('speed').textContent = '';
+  $('goBtn').disabled = true; say('Đang đọc video…');
+  try { movie = await openMovie(f); } catch (err) { say(err.message, 'err'); return; }
   const dur = movie.duration;
   $('info').textContent = `${f.name} · dài ${fmt(dur)} · ${mb(f.size)}`;
-  if (dur <= LEN + 0.05) {
-    say(`Video chỉ dài ${dur.toFixed(1).replace(".", ",")} giây, không cần cắt.`, 'ok');
-    return;
-  }
-  $('start').max = Math.max(0, dur - LEN).toFixed(1);
-  $('start').value = 0;
-  $('pickBox').classList.remove('hide');
-  $('cutBtn').disabled = false; say('');
-  updateRange(true);
+  if (dur <= LEN + 0.05) { say(`Video chỉ dài ${num(dur)} giây, không cần tua nhanh.`, 'ok'); return; }
+  $('speed').textContent = `Tua nhanh ×${num(dur / LEN)}: ${fmt(dur)} → 0:15`;
+  $('goBtn').disabled = false; say('');
 });
 
-function updateRange(seek) {
-  if (!movie) return;
-  const { t } = snapStart(movie, +$('start').value);
-  const L = Math.min(LEN, movie.duration - t);
-  $('range').textContent = `Giữ đoạn ${fmt(t)} → ${fmt(t + L)}`;
-  if (seek) { stopAt = null; $('src').pause(); $('src').currentTime = t; }
-  return t;
-}
-$('start').addEventListener('input', () => updateRange(true));
-
-$('playBtn').addEventListener('click', () => {
-  const v = $('src');
-  const t = movie ? updateRange(false) : 0;
-  v.currentTime = t; stopAt = t + LEN; v.play();
-});
-$('src').addEventListener('timeupdate', () => {
-  if (stopAt != null && $('src').currentTime >= stopAt) { $('src').pause(); stopAt = null; }
-});
-
-$('cutBtn').addEventListener('click', async () => {
-  if (!movie) return;
+$('goBtn').addEventListener('click', async () => {
+  if (!movie || busy) return;
+  busy = true;
   $('src').pause();
-  $('cutBtn').disabled = true; say('Đang cắt…');
+  $('goBtn').disabled = true;
+  $('bar').classList.remove('hide'); $('barFill').style.width = '0%';
+  say('Đang tua nhanh… Giữ màn hình mở, đừng chuyển sang app khác.');
+  let lock = null;
+  try { lock = await navigator.wakeLock?.request('screen'); } catch (_) {}
+  const t = performance.now();
   try {
-    const r = cutMovie(movie, +$('start').value, LEN);
-    const ext = (file.name.match(/\.(mov|mp4|m4v)$/i) || [, 'mov'])[1].toLowerCase();
-    const type = ext === 'mov' ? 'video/quicktime' : 'video/mp4';
+    const r = await speedUp(movie, (p) => { $('barFill').style.width = (p * 100).toFixed(1) + '%'; });
+    const blob = muxMp4(movie, r);
     const base = file.name.replace(/\.[^.]+$/, '') || 'video';
-    // Không "await" trước khi lưu: iPhone chỉ cho mở bảng lưu ngay sau khi bấm nút
-    outFile = new File(r.parts, `${base}-15s.${ext}`, { type });
+    outFile = new File([blob], `${base}-tua-15s.mp4`, { type: 'video/mp4' });
     if (outUrl) URL.revokeObjectURL(outUrl);
     outUrl = URL.createObjectURL(outFile);
     $('out').src = outUrl;
     $('dl').href = outUrl; $('dl').download = outFile.name;
-    $('outInfo').textContent = `${fmt(r.start)} → ${fmt(r.start + r.len)} · ${r.len.toFixed(1).replace(".", ",")} giây · ${mb(outFile.size)}`;
-    const canShare = !!(navigator.canShare && navigator.canShare({ files: [outFile] }));
-    $('shareBtn').classList.toggle('hide', !canShare);
+    $('outInfo').textContent = `Nhanh ×${num(r.speed)} · 15 giây · ${r.W}×${r.H} · ${mb(outFile.size)} · làm trong ${Math.round((performance.now() - t) / 1000)} giây`;
+    $('shareBtn').classList.toggle('hide', !(navigator.canShare && navigator.canShare({ files: [outFile] })));
     $('outCard').classList.remove('hide');
+    $('bar').classList.add('hide');
     say('');
     $('outCard').scrollIntoView({ behavior: 'smooth' });
-    // Tự lưu: iPhone mở bảng Chia sẻ (bấm "Lưu video" để vào Ảnh); máy tính thì tự tải file về
-    if (canShare) saveOut(); else $('dl').click();
+    if ($('shareBtn').classList.contains('hide')) $('dl').click(); else saveOut(true);
   } catch (err) {
-    say('Không cắt được: ' + err.message, 'err');
+    say('Không tua được: ' + err.message, 'err');
   }
-  $('cutBtn').disabled = false;
+  try { await lock?.release(); } catch (_) {}
+  busy = false;
+  $('goBtn').disabled = false;
 });
 
-async function saveOut() {
+// Tự lưu: iPhone mở bảng Chia sẻ (bấm "Lưu video" để vào Ảnh). Nếu máy chặn vì chưa bấm gì thì chờ bấm nút Lưu.
+async function saveOut(auto) {
   try { await navigator.share({ files: [outFile] }); }
   catch (err) {
     if (err.name === 'AbortError') return;
-    if (err.name !== 'NotAllowedError') alert('Không mở được bảng chia sẻ: ' + err.message);
+    if (err.name === 'NotAllowedError' && auto) { say('Bấm "📥 Lưu vào Ảnh" để lưu video.', 'ok'); return; }
+    alert('Không mở được bảng chia sẻ: ' + err.message);
   }
 }
-$('shareBtn').addEventListener('click', saveOut);
+$('shareBtn').addEventListener('click', () => saveOut(false));
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js');
 </script>

@@ -1,7 +1,7 @@
 {
-  "name": "Cắt video 15 giây",
-  "short_name": "Cắt 15s",
-  "description": "Cắt ngắn video còn 15 giây, giữ nguyên chất lượng",
+  "name": "Tua nhanh video 15 giây",
+  "short_name": "Tua 15s",
+  "description": "Tua nhanh cả video cho vừa 15 giây",
   "lang": "vi",
   "scope": "./",
   "start_url": "./",
