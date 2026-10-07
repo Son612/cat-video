@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Cắt 15s">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<meta name="theme-color" content="#111318">
+<meta name="robots" content="noindex, nofollow">
+<title>Cắt 15 giây</title>
+<style>
+  :root { --bg: #111318; --card: #1c1f27; --line: #2c303b; --text: #f2f3f5; --mute: #9aa0ad; --accent: #ffcc33; --ok: #4cd18a; --err: #ff6b6b; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); }
+  body { font: 17px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: env(safe-area-inset-top) 0 calc(24px + env(safe-area-inset-bottom)); }
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 20px; }
+  main { max-width: 560px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 14px; display: grid; gap: 12px; }
+  .btn { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 54px; padding: 12px 16px;
+    border: 0; border-radius: 14px; font: inherit; font-weight: 700; text-decoration: none; cursor: pointer; }
+  .btn.main { background: var(--accent); color: #1a1a1a; }
+  .btn.sub { background: #2a2e39; color: var(--text); }
+  .btn:disabled { opacity: .45; }
+  input[type=file] { display: none; }
+  video { width: 100%; max-height: 55vh; border-radius: 12px; background: #000; display: block; }
+  input[type=range] { width: 100%; height: 36px; accent-color: var(--accent); }
+  .row { display: flex; gap: 10px; }
+  .row .btn { flex: 1; }
+  .muted { color: var(--mute); font-size: 15px; }
+  .big { font-size: 19px; font-weight: 700; }
+  .hide { display: none !important; }
+  .msg { padding: 10px 12px; border-radius: 12px; background: #2a2e39; font-size: 15px; }
+  .msg.err { background: #3a1f22; color: #ffb4b4; }
+  .msg.ok { background: #18352a; color: #b9f3d3; }
+</style>
+</head>
+<body>
+<header><h1>✂️ Cắt video còn 15 giây</h1></header>
+<main>
+  <label class="btn main" for="file">🎬 Chọn video</label>
+  <input id="file" type="file" accept="video/*,.mov,.mp4,.m4v">
+  <div class="muted" id="hint">Chọn video quay bằng iPhone. Cắt xong app tự mở bảng lưu — bấm <b>Lưu video</b> là vào Ảnh. Cắt thẳng trên máy, không nén lại nên giữ nguyên chất lượng, không gửi đi đâu.</div>
+
+  <section class="card hide" id="editCard">
+    <video id="src" playsinline controls preload="auto"></video>
+    <div class="muted" id="info"></div>
+    <div id="pickBox" class="hide">
+      <div class="big" id="range"></div>
+      <input id="start" type="range" min="0" max="0" step="0.1" value="0" aria-label="Điểm bắt đầu">
+      <div class="muted">Kéo để chọn đoạn 15 giây muốn giữ.</div>
+    </div>
+    <div class="row">
+      <button class="btn sub" id="playBtn">▶ Xem đoạn này</button>
+    </div>
+    <button class="btn main" id="cutBtn">✂️ Cắt 15 giây</button>
+    <div class="msg hide" id="msg"></div>
+  </section>
+
+  <section class="card hide" id="outCard">
+    <div class="big">✓ Xong</div>
+    <video id="out" playsinline controls></video>
+    <div class="muted" id="outInfo"></div>
+    <button class="btn main" id="shareBtn">📥 Lưu vào Ảnh / Chia sẻ</button>
+    <a class="btn sub" id="dl" download>Tải file về</a>
+  </section>
+</main>
+
+<script>
+'use strict';
+const LEN = 15; // độ dài video sau khi cắt (giây)
+const $ = (id) => document.getElementById(id);
+let file = null, movie = null, srcUrl = '', outUrl = '', outFile = null, stopAt = null;
+
+// ---------- Đọc / ghi hộp MP4-MOV ----------
+const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl', 'edts', 'dinf']);
+const u32 = (d, o) => d.getUint32(o);
+const u64 = (d, o) => d.getUint32(o) * 4294967296 + d.getUint32(o + 4);
+const typeAt = (u8, o) => String.fromCharCode(u8[o], u8[o + 1], u8[o + 2], u8[o + 3]);
+
+function parseBoxes(u8, start, end) {
+  const d = new DataView(u8.buffer, u8.byteOffset, u8.byteLength), out = [];
+  let p = start;
+  while (p + 8 <= end) {
+    let size = u32(d, p), hdr = 8;
+    const type = typeAt(u8, p + 4);
+    if (size === 1) { size = u64(d, p + 8); hdr = 16; } else if (size === 0) size = end - p;
+    if (size < hdr || p + size > end) break;
+    const node = { type, hdr, data: u8.subarray(p, p + size) };
+    if (CONTAINERS.has(type)) node.kids = parseBoxes(u8, p + hdr, p + size);
+    out.push(node);
+    p += size;
+  }
+  return out;
+}
+const find = (node, type) => node.kids && node.kids.find((k) => k.type === type);
+const path = (node, ...types) => types.reduce((n, t) => n && find(n, t), node);
+const dv = (b) => new DataView(b.data.buffer, b.data.byteOffset, b.data.byteLength);
+
+function concat(parts) {
+  const n = parts.reduce((a, p) => a + p.length, 0), out = new Uint8Array(n);
+  let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+function box(type, ...parts) {
+  const body = concat(parts), out = new Uint8Array(8 + body.length), d = new DataView(out.buffer);
+  d.setUint32(0, out.length);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  out.set(body, 8);
+  return out;
+}
+function words(arr, signed) { // mảng số 32 bit
+  const out = new Uint8Array(arr.length * 4), d = new DataView(out.buffer);
+  arr.forEach((v, i) => signed ? d.setInt32(i * 4, v) : d.setUint32(i * 4, v));
+  return out;
+}
+const fullbox = (type, ver, flags, ...parts) => box(type, words([(ver << 24) | flags]), ...parts);
+function serialize(node) {
+  if (!node.kids) return node.data;
+  return box(node.type, ...node.kids.map(serialize));
+}
+function setDur(b, off0, off1, v) { // ghi thời lượng vào mvhd/tkhd/mdhd (bản 0 hoặc 1)
+  const d = dv(b), ver = b.data[b.hdr];
+  if (ver === 1) { d.setUint32(b.hdr + off1, Math.floor(v / 4294967296)); d.setUint32(b.hdr + off1 + 4, v >>> 0); }
+  else d.setUint32(b.hdr + off0, Math.min(v, 0xffffffff));
+}
+
+// Đọc bảng mẫu của một track
+function readTrack(trak, movieScale) {
+  const mdhd = path(trak, 'mdia', 'mdhd'), hdlr = path(trak, 'mdia', 'hdlr');
+  const stbl = path(trak, 'mdia', 'minf', 'stbl');
+  if (!mdhd || !hdlr || !stbl) return null;
+  const handler = typeAt(hdlr.data, hdlr.hdr + 8);
+  const md = dv(mdhd), mver = mdhd.data[mdhd.hdr];
+  const scale = u32(md, mdhd.hdr + (mver === 1 ? 20 : 12));
+  const t = { trak, handler, scale, stbl };
+
+  // Thời lượng từng mẫu (stts)
+  const stts = find(stbl, 'stts'), sd = dv(stts), sttsN = u32(sd, stts.hdr + 4);
+  const durs = [];
+  for (let i = 0; i < sttsN; i++) {
+    const c = u32(sd, stts.hdr + 8 + i * 8), delta = u32(sd, stts.hdr + 12 + i * 8);
+    for (let j = 0; j < c; j++) durs.push(delta);
+  }
+  const n = durs.length;
+  const dts = new Float64Array(n);
+  for (let i = 1; i < n; i++) dts[i] = dts[i - 1] + durs[i - 1];
+  t.durs = durs; t.dts = dts; t.n = n;
+
+  // Lệch thời điểm hiển thị (ctts)
+  const ctts = find(stbl, 'ctts');
+  t.ctts = new Int32Array(n);
+  if (ctts) {
+    const cd = dv(ctts), cn = u32(cd, ctts.hdr + 4); let k = 0;
+    for (let i = 0; i < cn; i++) {
+      const c = u32(cd, ctts.hdr + 8 + i * 8), off = cd.getInt32(ctts.hdr + 12 + i * 8);
+      for (let j = 0; j < c && k < n; j++) t.ctts[k++] = off;
+    }
+    t.hasCtts = true;
+  }
+
+  // Khung hình chính (stss) — không có thì mọi mẫu đều là khung chính
+  const stss = find(stbl, 'stss');
+  if (stss) {
+    const d = dv(stss), c = u32(d, stss.hdr + 4);
+    t.sync = new Uint8Array(n);
+    for (let i = 0; i < c; i++) { const s = u32(d, stss.hdr + 8 + i * 4) - 1; if (s < n) t.sync[s] = 1; }
+  }
+
+  // Kích thước mẫu (stsz)
+  const stsz = find(stbl, 'stsz');
+  if (!stsz) throw new Error('Định dạng chưa hỗ trợ (không có stsz).');
+  const zd = dv(stsz), fixed = u32(zd, stsz.hdr + 4);
+  t.sizes = new Uint32Array(n);
+  for (let i = 0; i < n; i++) t.sizes[i] = fixed || u32(zd, stsz.hdr + 12 + i * 4);
+
+  // Vị trí mẫu trong file (stsc + stco/co64)
+  const stco = find(stbl, 'stco'), co64 = find(stbl, 'co64');
+  const chunks = [];
+  if (stco) { const d = dv(stco), c = u32(d, stco.hdr + 4); for (let i = 0; i < c; i++) chunks.push(u32(d, stco.hdr + 8 + i * 4)); }
+  else if (co64) { const d = dv(co64), c = u32(d, co64.hdr + 4); for (let i = 0; i < c; i++) chunks.push(u64(d, co64.hdr + 8 + i * 8)); }
+  const stsc = find(stbl, 'stsc'), scd = dv(stsc), scn = u32(scd, stsc.hdr + 4);
+  const ent = [];
+  for (let i = 0; i < scn; i++) ent.push([u32(scd, stsc.hdr + 8 + i * 12) - 1, u32(scd, stsc.hdr + 12 + i * 12), u32(scd, stsc.hdr + 16 + i * 12)]);
+  t.offs = new Float64Array(n); t.sdi = new Uint32Array(n);
+  let s = 0;
+  for (let e = 0; e < ent.length && s < n; e++) {
+    const last = e + 1 < ent.length ? ent[e + 1][0] : chunks.length;
+    for (let c = ent[e][0]; c < last && s < n; c++) {
+      let o = chunks[c];
+      for (let j = 0; j < ent[e][1] && s < n; j++) { t.offs[s] = o; t.sdi[s] = ent[e][2]; o += t.sizes[s]; s++; }
+    }
+  }
+
+  // Danh sách sửa (edts/elst): đoạn trễ đầu + điểm bắt đầu của media
+  t.delay = 0; t.e0 = 0;
+  const elst = path(trak, 'edts', 'elst');
+  if (elst) {
+    const d = dv(elst), ver = elst.data[elst.hdr], c = u32(d, elst.hdr + 4), sz = ver === 1 ? 20 : 12;
+    for (let i = 0; i < c; i++) {
+      const p = elst.hdr + 8 + i * sz;
+      const segDur = ver === 1 ? u64(d, p) : u32(d, p);
+      const mt = ver === 1 ? d.getInt32(p + 8) * 4294967296 + d.getUint32(p + 12) : d.getInt32(p + 4);
+      if (mt === -1) t.delay += segDur / movieScale; else { t.e0 = mt; break; }
+    }
+  }
+  t.pres = (i) => (t.dts[i] + t.ctts[i] - t.e0) / t.scale + t.delay; // giây hiển thị của mẫu i
+  t.mediaDur = (dts[n - 1] + durs[n - 1] - t.e0) / scale + t.delay;
+  return t;
+}
+
+async function readFileBytes(f, a, b) { return new Uint8Array(await f.slice(a, b).arrayBuffer()); }
+
+async function openMovie(f) {
+  // Tìm hộp ftyp và moov ở cấp ngoài cùng (không đọc cả file vào bộ nhớ)
+  let p = 0, ftyp = null, moovPos = null;
+  while (p + 8 <= f.size) {
+    const h = await readFileBytes(f, p, p + 16), d = new DataView(h.buffer);
+    let size = u32(d, 0); const type = typeAt(h, 4);
+    if (size === 1) size = u64(d, 8); else if (size === 0) size = f.size - p;
+    if (size < 8) break;
+    if (type === 'ftyp') ftyp = await readFileBytes(f, p, p + size);
+    if (type === 'moov') moovPos = [p, p + size];
+    p += size;
+  }
+  if (!moovPos) throw new Error('Không đọc được video này (không tìm thấy phần mô tả moov).');
+  const moovBytes = await readFileBytes(f, moovPos[0], moovPos[1]);
+  const moov = parseBoxes(moovBytes, 0, moovBytes.length)[0];
+  const mvhd = find(moov, 'mvhd'), md = dv(mvhd), ver = mvhd.data[mvhd.hdr];
+  const scale = u32(md, mvhd.hdr + (ver === 1 ? 20 : 12));
+  const tracks = moov.kids.filter((k) => k.type === 'trak').map((tk) => readTrack(tk, scale))
+    .filter((t) => t && (t.handler === 'vide' || t.handler === 'soun') && t.n > 0);
+  const video = tracks.find((t) => t.handler === 'vide');
+  if (!tracks.length) throw new Error('Video không có hình hoặc tiếng.');
+  const duration = Math.max(...tracks.map((t) => t.mediaDur));
+  return { ftyp, moov, mvhd, scale, tracks, video, duration };
+}
+
+// Điểm bắt đầu thật: khung hình chính gần nhất trước (hoặc đúng) thời điểm chọn
+function snapStart(m, T) {
+  const v = m.video;
+  if (!v || !v.sync) return { t: T, k: v ? lastBefore(v, T) : -1 };
+  let k = -1;
+  for (let i = 0; i < v.n; i++) if (v.sync[i] && v.pres(i) <= T + 0.001) k = i;
+  if (k < 0) k = v.sync.indexOf(1);
+  return { t: Math.max(0, v.pres(k)), k };
+}
+function lastBefore(t, T) { let k = 0; for (let i = 0; i < t.n; i++) if (t.pres(i) <= T + 0.001) k = i; return k; }
+
+function cutMovie(m, T, len) {
+  const { t: Ts, k } = snapStart(m, T);
+  const L = Math.min(len, m.duration - Ts), Te = Ts + L;
+  const picks = [];
+  for (const tr of m.tracks) {
+    let s, e = -1, mediaStart;
+    if (tr === m.video) {
+      s = k;
+      for (let i = s; i < tr.n; i++) if (tr.pres(i) < Te - 0.0005) e = i;
+      mediaStart = Math.round((Ts - tr.delay) * tr.scale + tr.e0) - tr.dts[s];
+    } else {
+      const mt = Math.max(0, (Ts - tr.delay) * tr.scale + tr.e0), mtEnd = (Te - tr.delay) * tr.scale + tr.e0;
+      s = 0;
+      for (let i = 0; i < tr.n; i++) if (tr.dts[i] <= mt) s = i;
+      if (s > 0 && !(tr.sync && !tr.sync[s - 1])) s--; // lấy thêm 1 mẫu đệm cho âm thanh liền mạch
+      for (let i = s; i < tr.n; i++) if (tr.dts[i] < mtEnd) e = i;
+      mediaStart = Math.round(mt) - tr.dts[s];
+    }
+    if (e < s) continue;
+    picks.push({ tr, s, e, mediaStart: Math.max(0, mediaStart), segDur: Math.round(L * m.scale) });
+  }
+
+  // Xếp các mẫu theo thứ tự trong file gốc (giữ nguyên cách đan hình/tiếng), gom thành chunk
+  const all = [];
+  picks.forEach((p, ti) => { for (let i = p.s; i <= p.e; i++) all.push({ ti, i, off: p.tr.offs[i], size: p.tr.sizes[i] }); });
+  all.sort((a, b) => a.off - b.off);
+  let pos = 0;
+  for (const p of picks) { p.chunkPos = []; p.chunkCounts = []; p.chunkSdi = []; }
+  let prev = -1;
+  for (const smp of all) {
+    const p = picks[smp.ti], sdi = p.tr.sdi[smp.i];
+    if (prev === smp.ti && p.chunkSdi[p.chunkSdi.length - 1] === sdi) p.chunkCounts[p.chunkCounts.length - 1]++;
+    else { p.chunkPos.push(pos); p.chunkCounts.push(1); p.chunkSdi.push(sdi); }
+    smp.newPos = pos; pos += smp.size; prev = smp.ti;
+  }
+  const mdatSize = pos;
+
+  // Dựng lại moov
+  const build = (base) => {
+    const kids = [];
+    for (const k of m.moov.kids) {
+      if (k.type === 'mvhd') {
+        const c = { ...k, data: k.data.slice() };
+        setDur(c, 16, 24, Math.max(...picks.map((p) => p.segDur)));
+        kids.push(c);
+      } else if (k.type === 'trak') {
+        const p = picks.find((x) => x.tr.trak === k);
+        if (p) kids.push(buildTrak(p, base));
+      } else if (k.type !== 'iods') kids.push(k);
+    }
+    return serialize({ type: 'moov', kids });
+  };
+  const ftyp = m.ftyp || new Uint8Array(0);
+  const len1 = build(0).length;
+  const big = mdatSize + 8 > 0xffffffff;
+  const mdatHdr = big ? new Uint8Array(16) : new Uint8Array(8);
+  const hd = new DataView(mdatHdr.buffer);
+  if (big) { hd.setUint32(0, 1); hd.setUint32(8, Math.floor((mdatSize + 16) / 4294967296)); hd.setUint32(12, (mdatSize + 16) >>> 0); }
+  else hd.setUint32(0, mdatSize + 8);
+  mdatHdr.set([109, 100, 97, 116], 4); // "mdat"
+  const base = ftyp.length + len1 + mdatHdr.length;
+  const moov = build(base);
+
+  // Phần dữ liệu: các đoạn liền nhau của file gốc (đọc thẳng từ file, không chép vào bộ nhớ)
+  const parts = [ftyp, moov, mdatHdr];
+  let runA = -1, runB = -1;
+  for (const smp of all) {
+    if (smp.off === runB) runB += smp.size;
+    else { if (runA >= 0) parts.push(file.slice(runA, runB)); runA = smp.off; runB = smp.off + smp.size; }
+  }
+  if (runA >= 0) parts.push(file.slice(runA, runB));
+  return { parts, start: Ts, len: L };
+}
+
+function buildTrak(p, base) {
+  const tr = p.tr, idx = [];
+  for (let i = p.s; i <= p.e; i++) idx.push(i);
+  // stts
+  const stts = [];
+  for (const i of idx) {
+    const d = tr.durs[i];
+    if (stts.length && stts[stts.length - 1][1] === d) stts[stts.length - 1][0]++; else stts.push([1, d]);
+  }
+  const newStts = fullbox('stts', 0, 0, words([stts.length]), words(stts.flat()));
+  // ctts
+  let newCtts = null;
+  if (tr.hasCtts) {
+    const c = [];
+    for (const i of idx) {
+      const o = tr.ctts[i];
+      if (c.length && c[c.length - 1][1] === o) c[c.length - 1][0]++; else c.push([1, o]);
+    }
+    const flat = new Uint8Array(c.length * 8), d = new DataView(flat.buffer);
+    c.forEach(([n, o], j) => { d.setUint32(j * 8, n); d.setInt32(j * 8 + 4, o); });
+    newCtts = fullbox('ctts', c.some(([, o]) => o < 0) ? 1 : 0, 0, words([c.length]), flat);
+  }
+  // stss
+  let newStss = null;
+  if (tr.sync) {
+    const s = idx.map((i, j) => tr.sync[i] ? j + 1 : 0).filter(Boolean);
+    newStss = fullbox('stss', 0, 0, words([s.length]), words(s));
+  }
+  const newStsz = fullbox('stsz', 0, 0, words([0, idx.length]), words(idx.map((i) => tr.sizes[i])));
+  const sc = [];
+  p.chunkCounts.forEach((n, j) => {
+    const last = sc[sc.length - 1];
+    if (!last || last[1] !== n || last[2] !== p.chunkSdi[j]) sc.push([j + 1, n, p.chunkSdi[j]]);
+  });
+  const newStsc = fullbox('stsc', 0, 0, words([sc.length]), words(sc.flat()));
+  const newStco = fullbox('stco', 0, 0, words([p.chunkPos.length]), words(p.chunkPos.map((x) => x + base)));
+
+  const stblKids = [find(tr.stbl, 'stsd'), { data: newStts }];
+  if (newCtts) stblKids.push({ data: newCtts });
+  if (newStss) stblKids.push({ data: newStss });
+  stblKids.push({ data: newStsc }, { data: newStsz }, { data: newStco });
+
+  const mediaDur = idx.reduce((a, i) => a + tr.durs[i], 0);
+  const swap = (node) => {
+    if (node.type === 'stbl') return { type: 'stbl', kids: stblKids };
+    if (node.type === 'mdhd') { const c = { ...node, data: node.data.slice() }; setDur(c, 16, 24, mediaDur); return c; }
+    return node.kids ? { type: node.type, kids: node.kids.map(swap) } : node;
+  };
+  const kids = [];
+  for (const k of tr.trak.kids) {
+    if (k.type === 'tkhd') {
+      const c = { ...k, data: k.data.slice() };
+      setDur(c, 20, 28, p.segDur);
+      kids.push(c);
+      kids.push({ data: box('edts', fullbox('elst', 0, 0, words([1, p.segDur]), words([p.mediaStart], true), words([0x00010000]))) });
+    } else if (k.type === 'edts' || k.type === 'tref') continue;
+    else kids.push(swap(k));
+  }
+  return { type: 'trak', kids };
+}
+
+// ---------- Giao diện ----------
+const fmt = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); return m + ':' + (s - m * 60).toFixed(1).padStart(4, '0'); };
+const mb = (b) => (b / 1048576).toFixed(1).replace('.', ',') + ' MB';
+function say(text, kind) { const el = $('msg'); el.textContent = text; el.className = 'msg' + (kind ? ' ' + kind : ''); el.classList.toggle('hide', !text); }
+
+$('file').addEventListener('change', async (e) => {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  file = f; movie = null;
+  $('outCard').classList.add('hide');
+  $('editCard').classList.remove('hide');
+  $('hint').classList.add('hide');
+  if (srcUrl) URL.revokeObjectURL(srcUrl);
+  srcUrl = URL.createObjectURL(f);
+  $('src').src = srcUrl;
+  $('info').textContent = f.name + ' · ' + mb(f.size);
+  $('pickBox').classList.add('hide');
+  $('cutBtn').disabled = true; say('Đang đọc video…');
+  try {
+    movie = await openMovie(f);
+  } catch (err) { say(err.message, 'err'); return; }
+  const dur = movie.duration;
+  $('info').textContent = `${f.name} · dài ${fmt(dur)} · ${mb(f.size)}`;
+  if (dur <= LEN + 0.05) {
+    say(`Video chỉ dài ${dur.toFixed(1).replace(".", ",")} giây, không cần cắt.`, 'ok');
+    return;
+  }
+  $('start').max = Math.max(0, dur - LEN).toFixed(1);
+  $('start').value = 0;
+  $('pickBox').classList.remove('hide');
+  $('cutBtn').disabled = false; say('');
+  updateRange(true);
+});
+
+function updateRange(seek) {
+  if (!movie) return;
+  const { t } = snapStart(movie, +$('start').value);
+  const L = Math.min(LEN, movie.duration - t);
+  $('range').textContent = `Giữ đoạn ${fmt(t)} → ${fmt(t + L)}`;
+  if (seek) { stopAt = null; $('src').pause(); $('src').currentTime = t; }
+  return t;
+}
+$('start').addEventListener('input', () => updateRange(true));
+
+$('playBtn').addEventListener('click', () => {
+  const v = $('src');
+  const t = movie ? updateRange(false) : 0;
+  v.currentTime = t; stopAt = t + LEN; v.play();
+});
+$('src').addEventListener('timeupdate', () => {
+  if (stopAt != null && $('src').currentTime >= stopAt) { $('src').pause(); stopAt = null; }
+});
+
+$('cutBtn').addEventListener('click', async () => {
+  if (!movie) return;
+  $('src').pause();
+  $('cutBtn').disabled = true; say('Đang cắt…');
+  try {
+    const r = cutMovie(movie, +$('start').value, LEN);
+    const ext = (file.name.match(/\.(mov|mp4|m4v)$/i) || [, 'mov'])[1].toLowerCase();
+    const type = ext === 'mov' ? 'video/quicktime' : 'video/mp4';
+    const base = file.name.replace(/\.[^.]+$/, '') || 'video';
+    // Không "await" trước khi lưu: iPhone chỉ cho mở bảng lưu ngay sau khi bấm nút
+    outFile = new File(r.parts, `${base}-15s.${ext}`, { type });
+    if (outUrl) URL.revokeObjectURL(outUrl);
+    outUrl = URL.createObjectURL(outFile);
+    $('out').src = outUrl;
+    $('dl').href = outUrl; $('dl').download = outFile.name;
+    $('outInfo').textContent = `${fmt(r.start)} → ${fmt(r.start + r.len)} · ${r.len.toFixed(1).replace(".", ",")} giây · ${mb(outFile.size)}`;
+    const canShare = !!(navigator.canShare && navigator.canShare({ files: [outFile] }));
+    $('shareBtn').classList.toggle('hide', !canShare);
+    $('outCard').classList.remove('hide');
+    say('');
+    $('outCard').scrollIntoView({ behavior: 'smooth' });
+    // Tự lưu: iPhone mở bảng Chia sẻ (bấm "Lưu video" để vào Ảnh); máy tính thì tự tải file về
+    if (canShare) saveOut(); else $('dl').click();
+  } catch (err) {
+    say('Không cắt được: ' + err.message, 'err');
+  }
+  $('cutBtn').disabled = false;
+});
+
+async function saveOut() {
+  try { await navigator.share({ files: [outFile] }); }
+  catch (err) {
+    if (err.name === 'AbortError') return;
+    if (err.name !== 'NotAllowedError') alert('Không mở được bảng chia sẻ: ' + err.message);
+  }
+}
+$('shareBtn').addEventListener('click', saveOut);
+
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
