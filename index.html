@@ -40,6 +40,9 @@
   .msg.err { background: #3a1f22; color: #ffb4b4; }
   .bar { height: 10px; border-radius: 6px; background: #2a2e39; overflow: hidden; }
   .bar div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+  .overlay { position: fixed; inset: 0; z-index: 20; background: rgba(10,11,14,.92); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; padding: 24px; text-align: center; }
+  .overlay .btn { max-width: 420px; min-height: 96px; font-size: 24px; border-radius: 22px; }
   .msg.ok { background: #18352a; color: #b9f3d3; }
 </style>
 </head>
@@ -67,6 +70,12 @@
     <a class="btn sub" id="dl" download>Tải file về</a>
   </section>
 </main>
+<div class="overlay hide" id="saveBox">
+  <div class="big">✓ Đã tua xong</div>
+  <button class="btn main" id="saveBig">📥 Lưu vào Ảnh</button>
+  <div class="muted">Bấm nút trên, rồi chọn <b>Lưu video</b>.</div>
+  <button class="btn sub" id="saveSkip" style="min-height:48px;font-size:17px;max-width:200px">Để sau</button>
+</div>
 
 <script>
 'use strict';
@@ -507,15 +516,20 @@ $('goBtn').addEventListener('click', async () => {
   $('goBtn').disabled = false;
 });
 
-// Tự lưu: iPhone mở bảng Chia sẻ (bấm "Lưu video" để vào Ảnh). Nếu máy chặn vì chưa bấm gì thì chờ bấm nút Lưu.
+// Lưu: iPhone mở bảng Chia sẻ (chọn "Lưu video" để vào Ảnh). Safari không cho web tự ghi vào Ảnh,
+// và chặn tự mở bảng nếu tua lâu — khi đó hiện nút lưu to giữa màn hình.
 async function saveOut(auto) {
-  try { await navigator.share({ files: [outFile] }); }
-  catch (err) {
+  try {
+    await navigator.share({ files: [outFile] });
+    $('saveBox').classList.add('hide');
+  } catch (err) {
     if (err.name === 'AbortError') return;
-    if (err.name === 'NotAllowedError' && auto) { say('Bấm "📥 Lưu vào Ảnh" để lưu video.', 'ok'); return; }
+    if (err.name === 'NotAllowedError' && auto) { $('saveBox').classList.remove('hide'); return; }
     alert('Không mở được bảng chia sẻ: ' + err.message);
   }
 }
+$('saveBig').addEventListener('click', () => saveOut(false));
+$('saveSkip').addEventListener('click', () => $('saveBox').classList.add('hide'));
 $('shareBtn').addEventListener('click', () => saveOut(false));
 
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js');
